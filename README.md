@@ -102,7 +102,7 @@ This is a demonstration deployment, not a production-hardened monitoring stack. 
 
 ## Validation status
 
-The source and dashboard have been prepared and inspected. A full `npm install && npm run check` and live `pulumi up` / scrape verification **have not been completed in a running Kubernetes cluster**. Deployment commands above document how to perform those checks.
+**Verified in GitHub Actions on November 3, 2026:** dependency installation, `npm run check`, Kind cluster creation, `pulumi up`, Kubernetes workload readiness, Guestbook and Grafana HTTP checks, Prometheus metric discovery (frontend probes, Redis exporters, pod CPU), `pulumi destroy`, and Kind cluster cleanup all passed. See [successful integration run #3](https://github.com/stringztech/pulumi-guestbook-monitoring/actions/runs/41638650654). The temporary cluster was destroyed after testing; this repository does not include a continuously hosted Grafana instance. The Grafana dashboard is provisioned in code but an individual dashboard panel rendering check was not part of this automated integration test.
 
 ## Attribution
 
