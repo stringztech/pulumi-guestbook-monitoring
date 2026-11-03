@@ -62,9 +62,9 @@ jobs:
 
       - name: Check Kubernetes rollout
         run: |
-          kubectl -n guestbook rollout status deploy/redis-leader --timeout=180s
-          kubectl -n guestbook rollout status deploy/redis-replica --timeout=180s
-          kubectl -n guestbook rollout status deploy/frontend --timeout=180s
+          kubectl -n guestbook wait --for=condition=available deployment -l app=redis-leader --timeout=180s
+          kubectl -n guestbook wait --for=condition=available deployment -l app=redis-replica --timeout=180s
+          kubectl -n guestbook wait --for=condition=available deployment -l app=frontend --timeout=180s
           kubectl -n monitoring rollout status deploy/guestbook-grafana --timeout=240s
           kubectl -n monitoring get servicemonitors,probes
           kubectl get pods -A
