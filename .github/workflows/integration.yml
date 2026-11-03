@@ -113,6 +113,56 @@ jobs:
               raise SystemExit('Prometheus did not expose all expected Guestbook metrics')
           PY
 
+      - name: Verify Grafana dashboard and all six panels
+        run: |
+          python3 - <<'PY'
+          import base64, json, time, urllib.request, urllib.parse, urllib.error
+          base = 'http://localhost:3000'
+          token = base64.b64encode(b'admin:ci-only-do-not-reuse').decode()
+          headers = {'Authorization': 'Basic ' + token}
+          def get(path):
+              request = urllib.request.Request(base + path, headers=headers)
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  return json.load(response)
+          deadline = time.monotonic() + 150
+          dashboard = None
+          while time.monotonic() < deadline:
+              try:
+                  dashboard = get('/api/dashboards/uid/pulumi-guestbook')['dashboard']
+                  break
+              except (urllib.error.HTTPError, urllib.error.URLError, ValueError, KeyError):
+                  time.sleep(5)
+          if dashboard is None:
+              raise SystemExit('Dashboard was not provisioned in Grafana')
+          panels = dashboard.get('panels', [])
+          if len(panels) != 6:
+              raise SystemExit(f'Expected six panels; found {len(panels)}')
+          print('Grafana dashboard loaded:', dashboard.get('title'))
+          for panel in panels:
+              if panel.get('type') != 'timeseries' or not panel.get('targets'):
+                  raise SystemExit(f'Invalid panel: {panel.get("title")}')
+          datasources = get('/api/datasources')
+          prometheus_uids = {ds.get('uid') for ds in datasources if ds.get('type') == 'prometheus'}
+          print('Prometheus datasource UIDs:', prometheus_uids)
+          if 'prometheus' not in prometheus_uids:
+              raise SystemExit('Dashboard datasource UID prometheus is not provisioned')
+          for panel in panels:
+              expr = panel['targets'][0]['expr']
+              endpoint = '/api/datasources/proxy/uid/prometheus/api/v1/query?' + urllib.parse.urlencode({'query': expr})
+              deadline = time.monotonic() + 150
+              while True:
+                  try:
+                      result = get(endpoint)
+                      if result.get('status') == 'success' and result.get('data', {}).get('result'):
+                          print('PASS:', panel['title'], '- non-empty query result', flush=True)
+                          break
+                  except (urllib.error.HTTPError, urllib.error.URLError, ValueError, KeyError) as exc:
+                      print('Query not ready:', panel['title'], repr(exc), flush=True)
+                  if time.monotonic() >= deadline:
+                      raise SystemExit(f'No data for panel: {panel["title"]}, PromQL: {expr}')
+                  time.sleep(10)
+          PY
+
       - name: Collect troubleshooting details on failure
         if: failure()
         run: |
