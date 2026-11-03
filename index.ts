@@ -34,7 +34,7 @@ const monNamespace = monitoringNs.metadata.name;
 
 const redisLeaderLabels = { app: "redis-leader" };
 const redisLeader = new k8s.apps.v1.Deployment("redis-leader", {
-    metadata: { namespace: gbNamespace },
+    metadata: { namespace: gbNamespace, labels: redisLeaderLabels },
     spec: {
         replicas: 1,
         selector: { matchLabels: redisLeaderLabels },
@@ -56,7 +56,7 @@ new k8s.core.v1.Service("redis-leader-service", {
 
 const redisReplicaLabels = { app: "redis-replica" };
 const redisReplica = new k8s.apps.v1.Deployment("redis-replica", {
-    metadata: { namespace: gbNamespace },
+    metadata: { namespace: gbNamespace, labels: redisReplicaLabels },
     spec: {
         replicas: 2,
         selector: { matchLabels: redisReplicaLabels },
@@ -79,7 +79,7 @@ new k8s.core.v1.Service("redis-replica-service", {
 
 const frontendLabels = { app: "frontend" };
 const frontendDeployment = new k8s.apps.v1.Deployment("frontend", {
-    metadata: { namespace: gbNamespace },
+    metadata: { namespace: gbNamespace, labels: frontendLabels },
     spec: {
         replicas: 3,
         selector: { matchLabels: frontendLabels },
