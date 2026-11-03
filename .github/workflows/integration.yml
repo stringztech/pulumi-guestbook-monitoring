@@ -1,0 +1,130 @@
+name: Kubernetes Integration Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.ts'
+      - 'dashboard.ts'
+      - 'package.json'
+      - 'Pulumi.yaml'
+      - '.github/workflows/integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guestbook-kind-integration
+  cancel-in-progress: true
+
+jobs:
+  deploy-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      PULUMI_BACKEND_URL: file:///tmp/pulumi-guestbook-ci
+      PULUMI_CONFIG_PASSPHRASE: guestbook-ci-ephemeral-only
+      PULUMI_SKIP_UPDATE_CHECK: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install project dependencies
+        run: |
+          npm install --no-audit --no-fund
+          npm run check
+
+      - name: Create temporary Kubernetes cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: guestbook-ci
+          wait: 120s
+
+      - name: Install Pulumi CLI
+        run: |
+          curl -fsSL https://get.pulumi.com | sh
+          echo "$HOME/.pulumi/bin" >> "$GITHUB_PATH"
+          "$HOME/.pulumi/bin/pulumi" version
+
+      - name: Configure and deploy Pulumi stack
+        run: |
+          mkdir -p /tmp/pulumi-guestbook-ci
+          pulumi stack init ci
+          pulumi config set isMinikube true
+          pulumi config set grafanaServiceType NodePort
+          pulumi config set grafanaNodePort 30300
+          pulumi config set --secret grafanaAdminPassword "ci-only-do-not-reuse"
+          pulumi up --yes --skip-preview --non-interactive
+
+      - name: Check Kubernetes rollout
+        run: |
+          kubectl -n guestbook rollout status deploy/redis-leader --timeout=180s
+          kubectl -n guestbook rollout status deploy/redis-replica --timeout=180s
+          kubectl -n guestbook rollout status deploy/frontend --timeout=180s
+          kubectl -n monitoring rollout status deploy/guestbook-grafana --timeout=240s
+          kubectl -n monitoring get servicemonitors,probes
+          kubectl get pods -A
+
+      - name: Check frontend and Grafana HTTP
+        run: |
+          kubectl -n guestbook port-forward svc/frontend 8080:80 > /tmp/guestbook-pf.log 2>&1 &
+          kubectl -n monitoring port-forward svc/guestbook-grafana 3000:80 > /tmp/grafana-pf.log 2>&1 &
+          for i in $(seq 1 45); do
+            if curl -fsS http://localhost:8080/ > /dev/null && curl -fsS http://localhost:3000/api/health | grep -q database; then
+              echo "Guestbook and Grafana HTTP endpoints reachable"
+              exit 0
+            fi
+            sleep 3
+          done
+          cat /tmp/guestbook-pf.log /tmp/grafana-pf.log
+          exit 1
+
+      - name: Check Prometheus discovered targets
+        run: |
+          kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090 > /tmp/prometheus-pf.log 2>&1 &
+          python3 - <<'PY'
+          import json, time, urllib.request, urllib.parse
+          api = 'http://localhost:9090/api/v1/query?'
+          expected = {
+              'frontend_http_probe': 'count(probe_success{job="guestbook-frontend-http"})',
+              'redis_leader_and_replica': 'count(redis_up{namespace="monitoring"})',
+              'guestbook_cpu': 'count(container_cpu_usage_seconds_total{namespace="guestbook",container!="",container!="POD"})',
+          }
+          deadline = time.monotonic() + 240
+          while time.monotonic() < deadline:
+              seen = {}
+              for label, query in expected.items():
+                  try:
+                      with urllib.request.urlopen(api + urllib.parse.urlencode({'query': query}), timeout=10) as response:
+                          data = json.load(response)
+                      seen[label] = float(data['data']['result'][0]['value'][1]) if data['data']['result'] else 0
+                  except (OSError, KeyError, ValueError, IndexError):
+                      seen[label] = 0
+              print('Metric series:', seen, flush=True)
+              if seen['frontend_http_probe'] >= 1 and seen['redis_leader_and_replica'] >= 2 and seen['guestbook_cpu'] >= 1:
+                  print('Prometheus discovered expected Guestbook metrics')
+                  break
+              time.sleep(15)
+          else:
+              raise SystemExit('Prometheus did not expose all expected Guestbook metrics')
+          PY
+
+      - name: Collect troubleshooting details on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n monitoring get servicemonitors,probes,svc || true
+          kubectl -n guestbook get pods,svc || true
+          kubectl -n monitoring describe pods | tail -200 || true
+          pulumi stack output --json || true
+
+      - name: Destroy test deployment
+        if: always()
+        run: |
+          if command -v pulumi >/dev/null && pulumi stack select ci; then
+            pulumi destroy --yes --skip-preview --non-interactive || true
+          fi
